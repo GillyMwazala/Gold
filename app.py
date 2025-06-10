@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import plotly.graph_objects as go
 
 st.set_page_config(page_title="Gold Intraday Trader", layout="wide")
@@ -25,9 +24,19 @@ def get_pivot_levels():
     S2 = PP - (R1 - S1)
     return PP, R1, S1, R2, S2
 
-# 3. Add indicators
+# 3. Add indicators (RSI implementation without pandas_ta)
+def compute_rsi(series, length=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(window=length, min_periods=length).mean()
+    avg_loss = loss.rolling(window=length, min_periods=length).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def add_indicators(df):
-    df['RSI'] = ta.rsi(df['Close'], length=14)
+    df['RSI'] = compute_rsi(df['Close'], length=14)
     return df
 
 # 4. Generate signal
