@@ -7,6 +7,11 @@ import pandas as pd
 import numpy as np
 import requests
 from datetime import datetime
+import time
+
+# Current UTC time and user info
+CURRENT_UTC = "2025-06-10 08:10:51"
+CURRENT_USER = "GillyMwazala"
 
 # --- User must provide their Alpha Vantage API Key ---
 API_KEY = st.secrets["ALPHAVANTAGE_API_KEY"] if "ALPHAVANTAGE_API_KEY" in st.secrets else st.text_input("Enter your Alpha Vantage API Key:")
@@ -64,32 +69,52 @@ def calculate_risk_levels(entry_price, trade_type='BUY'):
     return stop_loss, take_profit
 
 def fetch_alpha_vantage(symbol, interval, function, api_key, outputsize="compact"):
-    url = f"https://www.alphavantage.co/query"
+    url = "https://www.alphavantage.co/query"
     params = {
-        "function": function,
+        "function": "FX_INTRADAY",  # Fixed: Always use FX_INTRADAY for forex
         "from_symbol": "XAU",
         "to_symbol": "USD",
         "interval": interval,
         "apikey": api_key,
-        "outputsize": outputsize,
-        "datatype": "json"
+        "outputsize": outputsize
     }
+    
     response = requests.get(url, params=params)
     if response.status_code != 200:
-        st.error("Failed to fetch data from Alpha Vantage.")
+        st.error(f"Failed to fetch data from Alpha Vantage. Status code: {response.status_code}")
         return None
+        
     data = response.json()
-    key = [k for k in data.keys() if "Time Series" in k]
-    if not key:
-        st.error("No 'Time Series' found in Alpha Vantage response. Check your API key or try again later.")
+    
+    # Debug information
+    st.write("API Response Keys:", list(data.keys()))
+    
+    # The correct key format for FX data
+    time_series_key = f"Time Series FX ({interval})"
+    
+    if time_series_key not in data:
+        st.error(f"No '{time_series_key}' found in Alpha Vantage response. Response contains: {list(data.keys())}")
+        if "Note" in data:
+            st.error(f"API Message: {data['Note']}")
+        if "Error Message" in data:
+            st.error(f"Error Message: {data['Error Message']}")
         return None
-    timeseries = data[key[0]]
+        
+    timeseries = data[time_series_key]
     df = pd.DataFrame(timeseries).T
-    df = df.rename(columns=lambda x: x.split('. ')[1])
+    
+    # Rename columns correctly for FX data
+    df = df.rename(columns={
+        "1. open": "open",
+        "2. high": "high",
+        "3. low": "low",
+        "4. close": "close"
+    })
+    
     df = df.astype(float)
     df.index = pd.to_datetime(df.index)
-    df = df.rename(columns={"open": "open", "high": "high", "low": "low", "close": "close"})
     df = df.sort_index()
+    
     return df
 
 # --- Streamlit UI ---
@@ -103,10 +128,10 @@ if not API_KEY:
 # Download data
 @st.cache_data(ttl=60, show_spinner=True)
 def load_data():
+    time.sleep(0.1)  # Add a small delay to avoid hitting rate limits
     df = fetch_alpha_vantage(GOLD_SYMBOL, interval, function, API_KEY, outputsize="full")
     if df is None or len(df) < 22:
         return None
-    # Resample if timeframe is 1 hour (Alpha Vantage's 60min)
     return df
 
 df = load_data()
@@ -178,6 +203,14 @@ if signal != "🟡 HOLD" and stop_loss is not None and take_profit is not None:
 else:
     st.info("No active trade signal at this time.")
 
+# --- Footer with timestamp and user info ---
 st.markdown("---")
-st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-st.caption("Data: Alpha Vantage | App by GillyMwazala")
+st.caption(f"Last updated: {CURRENT_UTC} UTC")
+st.caption(f"Created by: {CURRENT_USER}")
+st.caption("Data: Alpha Vantage")
+
+# Add version info
+st.sidebar.markdown("### App Information")
+st.sidebar.caption(f"Version: 1.0.0")
+st.sidebar.caption(f"Last Updated: {CURRENT_UTC}")
+st.sidebar.caption(f"Developer: {CURRENT_USER}")
