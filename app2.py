@@ -20,7 +20,8 @@ EMA_FAST = 50
 EMA_SLOW = 200
 RSI_PERIOD = 14
 REWARD_TO_RISK = 2
-USER = "GillyMwazala"
+CURRENT_TIME = "2025-06-10 14:42:32"  # Updated timestamp
+USER = "GillyMwazala"  # Updated user
 
 def fetch_data(symbol: str, interval: str, api_key: str, limit: int = 500) -> pd.DataFrame:
     """
@@ -32,7 +33,7 @@ def fetch_data(symbol: str, interval: str, api_key: str, limit: int = 500) -> pd
         "symbol": symbol,
         "interval": interval,
         "apikey": api_key,
-        "outputsize": str(limit),  # Convert to string as expected by the API
+        "outputsize": str(limit),
         "format": "JSON",
         "timezone": "UTC"
     }
@@ -41,7 +42,7 @@ def fetch_data(symbol: str, interval: str, api_key: str, limit: int = 500) -> pd
         logger.info(f"Fetching data for {symbol} with {interval} interval")
         response = requests.get(base_url, params=params, timeout=30)
         
-        # Log the actual URL being called (without API key)
+        # Log the API call (without API key)
         debug_params = params.copy()
         debug_params['apikey'] = 'HIDDEN'
         logger.info(f"API URL (without key): {base_url}?{requests.compat.urlencode(debug_params)}")
@@ -91,122 +92,134 @@ def fetch_data(symbol: str, interval: str, api_key: str, limit: int = 500) -> pd
 
 def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Calculate technical indicators"""
-    # Calculate EMAs
-    df['ema_fast'] = df['close'].ewm(span=EMA_FAST, adjust=False).mean()
-    df['ema_slow'] = df['close'].ewm(span=EMA_SLOW, adjust=False).mean()
-    
-    # Calculate RSI
-    delta = df['close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
-    rs = gain / loss
-    df['rsi'] = 100 - (100 / (1 + rs))
-    
-    return df
+    try:
+        # Calculate EMAs
+        df['ema_fast'] = df['close'].ewm(span=EMA_FAST, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=EMA_SLOW, adjust=False).mean()
+        
+        # Calculate RSI
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        return df
+    except Exception as e:
+        logger.error(f"Error calculating indicators: {str(e)}")
+        raise
 
 def generate_signals(df: pd.DataFrame) -> pd.DataFrame:
     """Generate trading signals"""
-    df['signal'] = ''
-    
-    for i in range(1, len(df)):
-        # Golden Cross (buy)
-        if (df['ema_fast'].iloc[i-1] < df['ema_slow'].iloc[i-1] and 
-            df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i] and
-            50 < df['rsi'].iloc[i] < 70):
-            df.loc[i, 'signal'] = 'buy'
-            
-        # Death Cross (sell)
-        elif (df['ema_fast'].iloc[i-1] > df['ema_slow'].iloc[i-1] and 
-              df['ema_fast'].iloc[i] < df['ema_slow'].iloc[i] and
-              30 < df['rsi'].iloc[i] < 50):
-            df.loc[i, 'signal'] = 'sell'
-            
-    return df
+    try:
+        df['signal'] = ''
+        
+        for i in range(1, len(df)):
+            # Golden Cross (buy)
+            if (df['ema_fast'].iloc[i-1] < df['ema_slow'].iloc[i-1] and 
+                df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i] and
+                50 < df['rsi'].iloc[i] < 70):
+                df.loc[i, 'signal'] = 'buy'
+                
+            # Death Cross (sell)
+            elif (df['ema_fast'].iloc[i-1] > df['ema_slow'].iloc[i-1] and 
+                  df['ema_fast'].iloc[i] < df['ema_slow'].iloc[i] and
+                  30 < df['rsi'].iloc[i] < 50):
+                df.loc[i, 'signal'] = 'sell'
+                
+        return df
+    except Exception as e:
+        logger.error(f"Error generating signals: {str(e)}")
+        raise
 
 def backtest(df: pd.DataFrame) -> list:
     """Run backtest on the signals"""
-    trades = []
-    position = None
-    
-    for i in range(1, len(df)):
-        row = df.iloc[i]
+    try:
+        trades = []
+        position = None
         
-        # New position entry
-        if position is None and row['signal'] in ['buy', 'sell']:
-            entry_price = row['close']
-            position = row['signal']
-            sl = row['low'] - (row['high'] - row['low']) if position == 'buy' else row['high'] + (row['high'] - row['low'])
-            tp = entry_price + (entry_price - sl) * REWARD_TO_RISK if position == 'buy' else entry_price - (sl - entry_price) * REWARD_TO_RISK
+        for i in range(1, len(df)):
+            row = df.iloc[i]
             
-            trades.append({
-                'entry_date': row['datetime'],
-                'type': position,
-                'entry': entry_price,
-                'sl': sl,
-                'tp': tp
-            })
-        
-        # Position management
-        elif position is not None:
-            current_trade = trades[-1]
+            # New position entry
+            if position is None and row['signal'] in ['buy', 'sell']:
+                entry_price = row['close']
+                position = row['signal']
+                sl = row['low'] - (row['high'] - row['low']) if position == 'buy' else row['high'] + (row['high'] - row['low'])
+                tp = entry_price + (entry_price - sl) * REWARD_TO_RISK if position == 'buy' else entry_price - (sl - entry_price) * REWARD_TO_RISK
+                
+                trades.append({
+                    'entry_date': row['datetime'],
+                    'type': position,
+                    'entry': entry_price,
+                    'sl': sl,
+                    'tp': tp
+                })
             
-            # Check for exit conditions
-            if position == 'buy':
-                if row['low'] <= current_trade['sl']:
-                    current_trade.update({
-                        'exit_date': row['datetime'],
-                        'exit': current_trade['sl'],
-                        'result': 'stop',
-                        'pnl': current_trade['sl'] - current_trade['entry']
-                    })
-                    position = None
-                elif row['high'] >= current_trade['tp']:
-                    current_trade.update({
-                        'exit_date': row['datetime'],
-                        'exit': current_trade['tp'],
-                        'result': 'target',
-                        'pnl': current_trade['tp'] - current_trade['entry']
-                    })
-                    position = None
-                elif row['rsi'] >= 70:
-                    current_trade.update({
-                        'exit_date': row['datetime'],
-                        'exit': row['close'],
-                        'result': 'rsi_exit',
-                        'pnl': row['close'] - current_trade['entry']
-                    })
-                    position = None
-            else:  # position == 'sell'
-                if row['high'] >= current_trade['sl']:
-                    current_trade.update({
-                        'exit_date': row['datetime'],
-                        'exit': current_trade['sl'],
-                        'result': 'stop',
-                        'pnl': current_trade['entry'] - current_trade['sl']
-                    })
-                    position = None
-                elif row['low'] <= current_trade['tp']:
-                    current_trade.update({
-                        'exit_date': row['datetime'],
-                        'exit': current_trade['tp'],
-                        'result': 'target',
-                        'pnl': current_trade['entry'] - current_trade['tp']
-                    })
-                    position = None
-                elif row['rsi'] <= 30:
-                    current_trade.update({
-                        'exit_date': row['datetime'],
-                        'exit': row['close'],
-                        'result': 'rsi_exit',
-                        'pnl': current_trade['entry'] - row['close']
-                    })
-                    position = None
-                    
-    return trades
+            # Position management
+            elif position is not None:
+                current_trade = trades[-1]
+                
+                # Check for exit conditions
+                if position == 'buy':
+                    if row['low'] <= current_trade['sl']:
+                        current_trade.update({
+                            'exit_date': row['datetime'],
+                            'exit': current_trade['sl'],
+                            'result': 'stop',
+                            'pnl': current_trade['sl'] - current_trade['entry']
+                        })
+                        position = None
+                    elif row['high'] >= current_trade['tp']:
+                        current_trade.update({
+                            'exit_date': row['datetime'],
+                            'exit': current_trade['tp'],
+                            'result': 'target',
+                            'pnl': current_trade['tp'] - current_trade['entry']
+                        })
+                        position = None
+                    elif row['rsi'] >= 70:
+                        current_trade.update({
+                            'exit_date': row['datetime'],
+                            'exit': row['close'],
+                            'result': 'rsi_exit',
+                            'pnl': row['close'] - current_trade['entry']
+                        })
+                        position = None
+                else:  # position == 'sell'
+                    if row['high'] >= current_trade['sl']:
+                        current_trade.update({
+                            'exit_date': row['datetime'],
+                            'exit': current_trade['sl'],
+                            'result': 'stop',
+                            'pnl': current_trade['entry'] - current_trade['sl']
+                        })
+                        position = None
+                    elif row['low'] <= current_trade['tp']:
+                        current_trade.update({
+                            'exit_date': row['datetime'],
+                            'exit': current_trade['tp'],
+                            'result': 'target',
+                            'pnl': current_trade['entry'] - current_trade['tp']
+                        })
+                        position = None
+                    elif row['rsi'] <= 30:
+                        current_trade.update({
+                            'exit_date': row['datetime'],
+                            'exit': row['close'],
+                            'result': 'rsi_exit',
+                            'pnl': current_trade['entry'] - row['close']
+                        })
+                        position = None
+                        
+        return trades
+    except Exception as e:
+        logger.error(f"Error in backtest: {str(e)}")
+        raise
 
 def main():
     try:
-        logger.info(f"Starting strategy backtest for user: {USER}")
+        logger.info(f"Starting strategy backtest for user: {USER} at {CURRENT_TIME}")
         logger.info(f"Fetching data for {SYMBOL} at {INTERVAL} interval")
         
         # Fetch data
@@ -227,10 +240,11 @@ def main():
         total_pnl = sum(t.get('pnl', 0) for t in trades)
         
         # Print results
-        print("\nBacktest Results:")
+        print(f"\nBacktest Results for {USER} at {CURRENT_TIME}:")
         print(f"Total Trades: {total_trades}")
         print(f"Winning Trades: {winning_trades}")
-        print(f"Win Rate: {(winning_trades/total_trades*100):.2f}% if total_trades > 0 else 0}%")
+        win_rate = (winning_trades/total_trades*100) if total_trades > 0 else 0
+        print(f"Win Rate: {win_rate:.2f}%")
         print(f"Total PnL: ${total_pnl:.2f}")
         
         # Print detailed trade log
@@ -239,9 +253,13 @@ def main():
             print(f"\nEntry Date: {trade['entry_date']}")
             print(f"Type: {trade['type']}")
             print(f"Entry: ${trade['entry']:.2f}")
-            print(f"Exit: ${trade['exit']:.2f}")
-            print(f"PnL: ${trade['pnl']:.2f}")
-            print(f"Result: {trade['result']}")
+            if 'exit' in trade:
+                print(f"Exit Date: {trade['exit_date']}")
+                print(f"Exit: ${trade['exit']:.2f}")
+                print(f"PnL: ${trade['pnl']:.2f}")
+                print(f"Result: {trade['result']}")
+            else:
+                print("Trade still open")
             
     except Exception as e:
         logger.error(f"Strategy execution failed: {str(e)}")
