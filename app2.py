@@ -1,412 +1,165 @@
-import streamlit as st
-st.set_page_config(page_title="Gold Intraday Signal – Backtest Improved Entries", layout="centered")
-
+import requests
 import pandas as pd
 import numpy as np
-import requests
-from datetime import datetime
-import time
+from datetime import datetime, timedelta
 
-# --- Current UTC time and User ---
-CURRENT_UTC = "2025-06-10 10:56:25"
-CURRENT_USER = "GillyMwazala"
+# --- CONFIGURATION ---
+API_KEY = "YOUR_TWELVE_DATA_API_KEY"
+SYMBOL = "XAU/USD"
+INTERVAL = "1h"  # or "4h"
+EMA_FAST = 50
+EMA_SLOW = 200
+RSI_PERIOD = 14
+REWARD_TO_RISK = 2  # 2:1 reward:risk
 
-# --- Require the Twelve Data API Key in secrets ---
-if "TWELVE_DATA_API_KEY" not in st.secrets:
-    st.error("Please add your Twelve Data API key to Streamlit secrets as 'TWELVE_DATA_API_KEY'.")
-    st.stop()
-API_KEY = st.secrets["TWELVE_DATA_API_KEY"]
-
-st.title("📊 Gold Intraday Signal – Backtest with Confirmed & Scaled Entries")
-
-# --- Constants and Parameters ---
-GOLD_SYMBOL = "XAU/USD"
-TIMEFRAME_MAP = {
-    "5 min": "5min",
-    "15 min": "15min",
-    "1 hour": "1h",
-}
-RISK_REWARD_RATIO = st.sidebar.slider("Risk/Reward Ratio", 1.0, 5.0, 2.0, 0.1)
-STOP_LOSS_ATR = st.sidebar.slider("Stop Loss (x ATR)", 0.5, 5.0, 2.0, 0.1)
-SCALE_LEVELS = st.sidebar.slider("Max Scaling Entries", 1, 4, 2, 1)
-SCALE_ATR_BUFFER = st.sidebar.slider("ATR scale-in buffer (xATR)", 0.05, 1.0, 0.2, 0.05)
-RSI_PERIOD = st.sidebar.slider("RSI Period", 2, 30, 14, 1)
-RSI_OVERSOLD = st.sidebar.slider("RSI Oversold", 10, 40, 30, 1)
-RSI_OVERBOUGHT = st.sidebar.slider("RSI Overbought", 60, 90, 70, 1)
-TREND_SMA = st.sidebar.slider("Trend SMA Period", 10, 100, 20, 2)
-
-def to_scalar(val):
-    if isinstance(val, pd.Series) or isinstance(val, np.ndarray):
-        return float(val.iloc[0]) if hasattr(val, "iloc") else float(val[0])
-    return float(val)
-
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=period).mean()
-    avg_loss = loss.rolling(window=period).mean()
-    avg_loss = avg_loss.replace(0, float('inf'))
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = np.abs(df['high'] - df['close'].shift())
-    low_close = np.abs(df['low'] - df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = ranges.max(axis=1)
-    atr = true_range.rolling(window=period).mean()
-    return atr
-
-def fetch_twelve_data(symbol, interval, api_key, outputsize=1500):
-    url = "https://api.twelvedata.com/time_series"
+def fetch_data(symbol, interval, api_key, limit=500):
+    url = f"https://api.twelvedata.com/time_series"
     params = {
         "symbol": symbol,
         "interval": interval,
+        "outputsize": limit,
         "apikey": api_key,
-        "outputsize": outputsize,
         "format": "JSON"
     }
-    response = requests.get(url, params=params)
-    data = response.json()
+    r = requests.get(url, params=params)
+    r.raise_for_status()
+    data = r.json()
     if "values" not in data:
-        for key in data:
-            st.error(f"{key}: {data[key]}")
-        st.error(f"No 'values' found in Twelve Data response. Response contains: {list(data.keys())}")
-        return None
+        raise Exception("Failed to fetch data: " + str(data))
     df = pd.DataFrame(data["values"])
-    df = df.rename(columns={
-        "datetime": "datetime",
-        "open": "open",
-        "high": "high",
-        "low": "low",
-        "close": "close"
-    })
-    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
     df["datetime"] = pd.to_datetime(df["datetime"])
-    df = df.set_index("datetime")
-    df = df.sort_index()
+    df = df.sort_values("datetime")
+    for col in ["open", "high", "low", "close"]:
+        df[col] = df[col].astype(float)
+    return df.reset_index(drop=True)
+
+def ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
+
+def rsi(series, period):
+    delta = series.diff()
+    up = delta.clip(lower=0)
+    down = -delta.clip(upper=0)
+    ma_up = up.rolling(window=period).mean()
+    ma_down = down.rolling(window=period).mean()
+    rs = ma_up / ma_down
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def signal_generator(df):
+    df["ema_fast"] = ema(df["close"], EMA_FAST)
+    df["ema_slow"] = ema(df["close"], EMA_SLOW)
+    df["rsi"] = rsi(df["close"], RSI_PERIOD)
+    df["signal"] = ""
+
+    for i in range(1, len(df)):
+        # --- Detect EMA crossovers ---
+        prev_fast = df.loc[i-1, "ema_fast"]
+        prev_slow = df.loc[i-1, "ema_slow"]
+        curr_fast = df.loc[i,   "ema_fast"]
+        curr_slow = df.loc[i,   "ema_slow"]
+        curr_rsi = df.loc[i,    "rsi"]
+
+        # Golden Cross (buy)
+        if (prev_fast < prev_slow) and (curr_fast > curr_slow):
+            if 50 < curr_rsi < 70:
+                df.loc[i, "signal"] = "buy"
+        # Death Cross (sell)
+        elif (prev_fast > prev_slow) and (curr_fast < curr_slow):
+            if 30 < curr_rsi < 50:
+                df.loc[i, "signal"] = "sell"
     return df
 
-# --- Streamlit UI ---
-timeframe = st.selectbox("Select Timeframe", options=list(TIMEFRAME_MAP.keys()), index=2)
-interval = TIMEFRAME_MAP[timeframe]
+def find_swing(df, i, direction="low"):
+    window = 10  # lookback window for swing highs/lows
+    if direction == "low":
+        return df["low"].iloc[max(0, i-window):i+1].min()
+    elif direction == "high":
+        return df["high"].iloc[max(0, i-window):i+1].max()
 
-@st.cache_data(ttl=60, show_spinner=True)
-def load_data():
-    time.sleep(0.1)
-    df = fetch_twelve_data(GOLD_SYMBOL, interval, API_KEY, outputsize=1500)
-    if df is None or len(df) < 60:
-        return None
-    return df
-
-df = load_data()
-if df is None:
-    st.error("Failed to load data. Please check your API key or try again later.")
-    st.stop()
-
-# --- Technicals ---
-df['RSI'] = calculate_rsi(df['close'], RSI_PERIOD)
-df['ATR'] = calculate_atr(df)
-df['SMA'] = df['close'].rolling(window=TREND_SMA).mean()
-df['prev_close'] = df['close'].shift(1)
-df['prev_high'] = df['high'].shift(1)
-df['prev_low'] = df['low'].shift(1)
-
-def calculate_max_drawdown(equity_curve):
-    if not equity_curve:
-        return 0
-    peak = equity_curve[0]
-    max_dd = 0
-    for value in equity_curve:
-        if value > peak:
-            peak = value
-        dd = peak - value
-        if dd > max_dd:
-            max_dd = dd
-    return max_dd
-
-def backtest_confirmed_scaled(df):
+def backtest(df):
     trades = []
-    open_trade = None
-    equity_curve = []
-    timestamp_curve = []
-    equity = 0
-
-    for i in range(TREND_SMA + 2, len(df)-1):
+    position = None
+    entry_price = sl = tp = None
+    for i in range(1, len(df)):
         row = df.iloc[i]
-        prev_row = df.iloc[i-1]
-        curr_time = df.index[i]
-        atr = to_scalar(row['ATR'])
+        if position is None:
+            if row.signal == "buy":
+                swing_low = find_swing(df, i, "low")
+                sl = swing_low
+                entry_price = row.close
+                tp = entry_price + (entry_price - sl) * REWARD_TO_RISK
+                position = "long"
+                entry_idx = i
+                trades.append({"type": "buy", "entry": entry_price, "sl": sl, "tp": tp, "entry_idx": i})
+            elif row.signal == "sell":
+                swing_high = find_swing(df, i, "high")
+                sl = swing_high
+                entry_price = row.close
+                tp = entry_price - (sl - entry_price) * REWARD_TO_RISK
+                position = "short"
+                entry_idx = i
+                trades.append({"type": "sell", "entry": entry_price, "sl": sl, "tp": tp, "entry_idx": i})
+        else:
+            # manage open position
+            open_trade = trades[-1]
+            if open_trade["type"] == "buy":
+                # Stop-loss or take-profit hit
+                if row.low <= open_trade["sl"]:
+                    open_trade["exit"] = open_trade["sl"]
+                    open_trade["exit_idx"] = i
+                    open_trade["result"] = "stop"
+                    position = None
+                elif row.high >= open_trade["tp"]:
+                    open_trade["exit"] = open_trade["tp"]
+                    open_trade["exit_idx"] = i
+                    open_trade["result"] = "tp"
+                    position = None
+                # Optional exit: RSI > 70
+                elif row.rsi >= 70:
+                    open_trade["exit"] = row.close
+                    open_trade["exit_idx"] = i
+                    open_trade["result"] = "rsi_exit"
+                    position = None
+            elif open_trade["type"] == "sell":
+                if row.high >= open_trade["sl"]:
+                    open_trade["exit"] = open_trade["sl"]
+                    open_trade["exit_idx"] = i
+                    open_trade["result"] = "stop"
+                    position = None
+                elif row.low <= open_trade["tp"]:
+                    open_trade["exit"] = open_trade["tp"]
+                    open_trade["exit_idx"] = i
+                    open_trade["result"] = "tp"
+                    position = None
+                # Optional exit: RSI < 30
+                elif row.rsi <= 30:
+                    open_trade["exit"] = row.close
+                    open_trade["exit_idx"] = i
+                    open_trade["result"] = "rsi_exit"
+                    position = None
+    # Calculate P/L
+    for trade in trades:
+        if "exit" in trade:
+            if trade["type"] == "buy":
+                trade["pnl"] = trade["exit"] - trade["entry"]
+            else:
+                trade["pnl"] = trade["entry"] - trade["exit"]
+        else:
+            trade["pnl"] = 0
+    return trades
 
-        # Buy confirmation: RSI crosses below oversold, price closes above prev high, AND above SMA (trend filter)
-        buy_confirm = (
-            prev_row['RSI'] > RSI_OVERSOLD and row['RSI'] <= RSI_OVERSOLD and
-            row['close'] > prev_row['high'] and
-            row['close'] > row['SMA']
-        )
-        # Sell confirmation: RSI crosses above overbought, price closes below prev low, AND below SMA
-        sell_confirm = (
-            prev_row['RSI'] < RSI_OVERBOUGHT and row['RSI'] >= RSI_OVERBOUGHT and
-            row['close'] < prev_row['low'] and
-            row['close'] < row['SMA']
-        )
+def main():
+    df = fetch_data(SYMBOL, INTERVAL, API_KEY)
+    df = signal_generator(df)
+    trades = backtest(df)
+    print("Trade Log:")
+    for t in trades:
+        print(t)
+    total_pnl = sum(t["pnl"] for t in trades)
+    wins = sum(1 for t in trades if t.get("result") == "tp")
+    losses = sum(1 for t in trades if t.get("result") == "stop")
+    print(f"Total PnL: {total_pnl:.2f}, Wins: {wins}, Losses: {losses}, Total Trades: {len(trades)}")
 
-        if buy_confirm and open_trade is None:
-            entry = row['close']
-            stop = entry - STOP_LOSS_ATR * atr
-            target = entry + STOP_LOSS_ATR * atr * RISK_REWARD_RATIO
-            open_trade = {
-                'side': "BUY",
-                'lots': [entry],
-                'entry_times': [curr_time],
-                'stops': [stop],
-                'targets': [target],
-                'scale_count': 1,
-                'last_scale_price': entry
-            }
-        elif open_trade and open_trade['side'] == "BUY" and open_trade['scale_count'] < SCALE_LEVELS:
-            if row['close'] > open_trade['last_scale_price'] + SCALE_ATR_BUFFER * atr:
-                entry = row['close']
-                stop = entry - STOP_LOSS_ATR * atr
-                target = entry + STOP_LOSS_ATR * atr * RISK_REWARD_RATIO
-                open_trade['lots'].append(entry)
-                open_trade['entry_times'].append(curr_time)
-                open_trade['stops'].append(stop)
-                open_trade['targets'].append(target)
-                open_trade['scale_count'] += 1
-                open_trade['last_scale_price'] = entry
-
-        if sell_confirm and open_trade is None:
-            entry = row['close']
-            stop = entry + STOP_LOSS_ATR * atr
-            target = entry - STOP_LOSS_ATR * atr * RISK_REWARD_RATIO
-            open_trade = {
-                'side': "SELL",
-                'lots': [entry],
-                'entry_times': [curr_time],
-                'stops': [stop],
-                'targets': [target],
-                'scale_count': 1,
-                'last_scale_price': entry
-            }
-        elif open_trade and open_trade['side'] == "SELL" and open_trade['scale_count'] < SCALE_LEVELS:
-            if row['close'] < open_trade['last_scale_price'] - SCALE_ATR_BUFFER * atr:
-                entry = row['close']
-                stop = entry + STOP_LOSS_ATR * atr
-                target = entry - STOP_LOSS_ATR * atr * RISK_REWARD_RATIO
-                open_trade['lots'].append(entry)
-                open_trade['entry_times'].append(curr_time)
-                open_trade['stops'].append(stop)
-                open_trade['targets'].append(target)
-                open_trade['scale_count'] += 1
-                open_trade['last_scale_price'] = entry
-
-        if open_trade:
-            exit_indices = []
-            trade_results = []
-            for idx, entry in enumerate(open_trade['lots']):
-                stop = open_trade['stops'][idx]
-                target = open_trade['targets'][idx]
-                entry_time = open_trade['entry_times'][idx]
-                exit_price = None
-                exit_time = None
-                result = None
-                if open_trade['side'] == "BUY":
-                    if row['low'] <= stop:
-                        exit_price = stop
-                        exit_time = curr_time
-                        result = "Stopped"
-                    elif row['high'] >= target:
-                        exit_price = target
-                        exit_time = curr_time
-                        result = "Target"
-                else:
-                    if row['high'] >= stop:
-                        exit_price = stop
-                        exit_time = curr_time
-                        result = "Stopped"
-                    elif row['low'] <= target:
-                        exit_price = target
-                        exit_time = curr_time
-                        result = "Target"
-                if exit_price is not None:
-                    pnl = (exit_price - entry) if open_trade['side'] == "BUY" else (entry - exit_price)
-                    trade_results.append({
-                        'side': open_trade['side'],
-                        'entry': entry,
-                        'entry_time': entry_time,
-                        'exit': exit_price,
-                        'exit_time': exit_time,
-                        'result': result,
-                        'pnl': pnl,
-                        'scale': idx+1,
-                    })
-                    exit_indices.append(idx)
-
-            for idx in sorted(exit_indices, reverse=True):
-                del open_trade['lots'][idx]
-                del open_trade['entry_times'][idx]
-                del open_trade['stops'][idx]
-                del open_trade['targets'][idx]
-                open_trade['scale_count'] -= 1
-
-            if trade_results:
-                for tr in trade_results:
-                    trades.append(tr)
-                    equity += tr['pnl']
-            if open_trade['scale_count'] == 0:
-                open_trade = None
-
-        equity_curve.append(equity)
-        timestamp_curve.append(curr_time)
-
-    if open_trade:
-        row = df.iloc[-1]
-        for idx, entry in enumerate(open_trade['lots']):
-            exit_price = row['close']
-            pnl = (exit_price - entry) if open_trade['side'] == "BUY" else (entry - exit_price)
-            trades.append({
-                'side': open_trade['side'],
-                'entry': entry,
-                'entry_time': open_trade['entry_times'][idx],
-                'exit': exit_price,
-                'exit_time': df.index[-1],
-                'result': "ManualClose",
-                'pnl': pnl,
-                'scale': idx+1,
-            })
-            equity += pnl
-        open_trade = None
-        equity_curve.append(equity)
-        timestamp_curve.append(df.index[-1])
-
-    return trades, equity_curve, timestamp_curve
-
-# --- Display current status ---
-current_price = to_scalar(df.iloc[-1]['close'])
-previous_close = to_scalar(df.iloc[-2]['close'])
-price_delta = current_price - previous_close
-rsi_value = to_scalar(df.iloc[-1]['RSI'])
-
-st.markdown(f"### ⏱️ {timeframe} Frame")
-st.metric("Gold Price", f"${current_price:.2f}", delta=f"{price_delta:.2f}")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("RSI", f"{rsi_value:.2f}")
-with col2:
-    st.metric("ATR", f"{df.iloc[-1]['ATR']:.2f}")
-with col3:
-    st.metric(f"SMA{TREND_SMA}", f"{df.iloc[-1]['SMA']:.2f}")
-
-run_backtest = st.button("Run Backtest")
-
-if run_backtest:
-    st.info("Running backtest, please wait...")
-    trades, equity_curve, timestamp_curve = backtest_confirmed_scaled(df)
-    df_trades = pd.DataFrame(trades)
-
-    # --- Safe summary stats block ---
-    if not df_trades.empty and 'pnl' in df_trades.columns:
-        total_pnl = df_trades['pnl'].sum()
-        win_trades = df_trades[df_trades['pnl'] > 0]
-        loss_trades = df_trades[df_trades['pnl'] <= 0]
-        win_rate = len(win_trades) / len(df_trades) * 100 if len(df_trades) else 0
-        avg_win = win_trades['pnl'].mean() if not win_trades.empty else 0
-        avg_loss = loss_trades['pnl'].mean() if not loss_trades.empty else 0
-        profit_factor = win_trades['pnl'].sum() / abs(loss_trades['pnl'].sum()) if not loss_trades.empty and abs(loss_trades['pnl'].sum()) > 0 else np.inf
-    else:
-        total_pnl = 0
-        win_rate = 0
-        avg_win = 0
-        avg_loss = 0
-        profit_factor = 0
-
-    # Using the new max drawdown calculation
-    max_drawdown = calculate_max_drawdown(equity_curve) if equity_curve else 0
-
-    st.success(f"Backtest completed. {len(df_trades)} exits (partial lots) recorded.")
-
-    # Display stats
-    st.markdown("#### Backtest Results")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Trades (lots closed)", len(df_trades))
-    c2.metric("Win Rate (%)", f"{win_rate:.1f}")
-    c3.metric("Net PnL ($)", f"{total_pnl:.2f}")
-    c1.metric("Profit Factor", f"{profit_factor:.2f}")
-    c2.metric("Avg Win", f"{avg_win:.2f}")
-    c3.metric("Avg Loss", f"{avg_loss:.2f}")
-    c1.metric("Max Drawdown", f"{max_drawdown:.2f}")
-
-    # Show sample trades
-    st.markdown("#### Trade Log (most recent)")
-    if not df_trades.empty:
-        st.dataframe(df_trades.sort_values('exit_time', ascending=False).head(20), use_container_width=True)
-    else:
-        st.info("No trades were generated by the current strategy/parameters.")
-
-    # Show equity curve
-    st.markdown("#### Equity Curve")
-    if len(equity_curve) > 0:
-        eq_df = pd.DataFrame({'equity': equity_curve}, index=pd.to_datetime(timestamp_curve))
-        st.line_chart(eq_df)
-    else:
-        st.info("No equity curve available.")
-
-    # Show open/close signals on the price chart
-    import plotly.graph_objects as go
-    price_fig = go.Figure()
-    price_fig.add_trace(go.Candlestick(
-        x=df.index,
-        open=df['open'],
-        high=df['high'],
-        low=df['low'],
-        close=df['close'],
-        name='Price'
-    ))
-    # Add buy/sell markers
-    if not df_trades.empty:
-        buy_trades = df_trades[df_trades['side'] == 'BUY']
-        sell_trades = df_trades[df_trades['side'] == 'SELL']
-        price_fig.add_trace(go.Scatter(
-            x=buy_trades['entry_time'],
-            y=buy_trades['entry'],
-            mode='markers',
-            marker=dict(color='green', symbol='triangle-up', size=10),
-            name='Buy Entries'
-        ))
-        price_fig.add_trace(go.Scatter(
-            x=sell_trades['entry_time'],
-            y=sell_trades['entry'],
-            mode='markers',
-            marker=dict(color='red', symbol='triangle-down', size=10),
-            name='Sell Entries'
-        ))
-        price_fig.add_trace(go.Scatter(
-            x=buy_trades['exit_time'],
-            y=buy_trades['exit'],
-            mode='markers',
-            marker=dict(color='lime', symbol='star', size=8),
-            name='Buy Exits'
-        ))
-        price_fig.add_trace(go.Scatter(
-            x=sell_trades['exit_time'],
-            y=sell_trades['exit'],
-            mode='markers',
-            marker=dict(color='orange', symbol='star', size=8),
-            name='Sell Exits'
-        ))
-    st.plotly_chart(price_fig, use_container_width=True)
-
-# --- Footer ---
-st.markdown("---")
-st.caption(f"Last updated: {CURRENT_UTC} UTC")
-st.caption(f"Created by: {CURRENT_USER}")
-st.caption("Data: Twelve Data")
-
-st.sidebar.markdown("### App Information")
-st.sidebar.caption("Version: 2.2.0")
-st.sidebar.caption(f"Last Updated: {CURRENT_UTC}")
-st.sidebar.caption(f"Developer: {CURRENT_USER}")
+if __name__ == "__main__":
+    main()
