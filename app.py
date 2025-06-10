@@ -7,8 +7,11 @@ import requests
 from datetime import datetime
 import time
 
-# --- User must provide their Twelve Data API Key ---
-API_KEY = st.secrets["TWELVE_DATA_API_KEY"] if "TWELVE_DATA_API_KEY" in st.secrets else st.text_input("Enter your Twelve Data API Key:")
+# --- Require the Twelve Data API Key in secrets ---
+if "TWELVE_DATA_API_KEY" not in st.secrets:
+    st.error("Please add your Twelve Data API key to Streamlit secrets as 'TWELVE_DATA_API_KEY'.")
+    st.stop()
+API_KEY = st.secrets["TWELVE_DATA_API_KEY"]
 
 st.title("📊 Gold Intraday Signal – Multi-Timeframe (Twelve Data)")
 
@@ -94,10 +97,6 @@ def fetch_twelve_data(symbol, interval, api_key, outputsize=500):
 # --- Streamlit UI ---
 timeframe = st.selectbox("Select Timeframe", options=list(TIMEFRAME_MAP.keys()), index=2)
 interval = TIMEFRAME_MAP[timeframe]
-
-if not API_KEY:
-    st.warning("Please enter your Twelve Data API Key to continue.")
-    st.stop()
 
 @st.cache_data(ttl=60, show_spinner=True)
 def load_data():
