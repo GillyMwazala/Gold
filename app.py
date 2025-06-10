@@ -8,7 +8,11 @@ from datetime import datetime
 st.set_page_config(page_title="Gold Intraday Signal", layout="centered")
 st.title("📊 Gold Intraday Signal – Pivot + RSI Strategy")
 
-# Custom RSI without pandas_ta
+# Constants for risk management
+RISK_REWARD_RATIO = 2.0  # 1:2 risk-reward ratio
+STOP_LOSS_PERCENT = 0.005  # 0.5% stop loss
+TAKE_PROFIT_PERCENT = STOP_LOSS_PERCENT * RISK_REWARD_RATIO  # 1% take profit
+
 def calculate_rsi(series, period=14):
     try:
         delta = series.diff()
@@ -18,7 +22,6 @@ def calculate_rsi(series, period=14):
         avg_gain = gain.rolling(window=period).mean()
         avg_loss = loss.rolling(window=period).mean()
         
-        # Avoid division by zero
         avg_loss = avg_loss.replace(0, float('inf'))
         rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs))
@@ -57,6 +60,16 @@ def get_pivot_levels():
         st.error(f"Error calculating pivot levels: {str(e)}")
         return None, None, None
 
+def calculate_risk_levels(entry_price, trade_type='BUY'):
+    """Calculate Stop Loss and Take Profit levels based on trade type"""
+    if trade_type == 'BUY':
+        stop_loss = entry_price * (1 - STOP_LOSS_PERCENT)
+        take_profit = entry_price * (1 + TAKE_PROFIT_PERCENT)
+    else:  # SELL
+        stop_loss = entry_price * (1 + STOP_LOSS_PERCENT)
+        take_profit = entry_price * (1 - TAKE_PROFIT_PERCENT)
+    return stop_loss, take_profit
+
 def get_signal(df, PP, R1, S1):
     try:
         if df is None or PP is None:
@@ -65,7 +78,6 @@ def get_signal(df, PP, R1, S1):
         df['RSI'] = calculate_rsi(df['Close'])
         latest = df.iloc[-1]
         
-        # Convert to float to avoid pandas Series comparison error
         price = float(latest['Close'])
         rsi = float(latest['RSI'])
         S1 = float(S1)
@@ -73,21 +85,28 @@ def get_signal(df, PP, R1, S1):
         
         signal = "Hold"
         entry_price = None
+        stop_loss = None
+        take_profit = None
+        trade_type = None
 
-        # Now using scalar float values for comparison
+        # Generate signals with risk management levels
         if price <= S1 and rsi < 30:
+            trade_type = 'BUY'
             signal = "🟢 Entry: BUY"
             entry_price = price
+            stop_loss, take_profit = calculate_risk_levels(entry_price, trade_type)
         elif price >= R1 and rsi > 70:
+            trade_type = 'SELL'
             signal = "🔴 Entry: SELL"
             entry_price = price
+            stop_loss, take_profit = calculate_risk_levels(entry_price, trade_type)
         else:
             signal = "🟡 No Trade"
 
-        return signal, price, rsi, entry_price
+        return signal, price, rsi, entry_price, stop_loss, take_profit, trade_type
     except Exception as e:
         st.error(f"Error generating signal: {str(e)}")
-        return "Error", None, None, None
+        return "Error", None, None, None, None, None, None
 
 # Main execution pipeline
 try:
@@ -103,26 +122,58 @@ try:
         st.warning("Unable to calculate pivot levels. Please try again later.")
         st.stop()
 
-    # Generate signal
-    signal, price, rsi, entry_price = get_signal(df, PP, R1, S1)
+    # Generate signal with risk levels
+    signal, price, rsi, entry_price, stop_loss, take_profit, trade_type = get_signal(df, PP, R1, S1)
     
-    # Display results
+    # Display Strategy Summary
     st.markdown("### ⚙️ Strategy Summary")
-    if price is not None:
-        st.markdown(f"**Current Price:** ${price:.2f}")
-    if rsi is not None:
-        st.markdown(f"**RSI (14):** {rsi:.2f}")
-    st.markdown(f"**Pivot Point:** {PP:.2f}")
-    st.markdown(f"**R1 (Resistance):** {R1:.2f}")
-    st.markdown(f"**S1 (Support):** {S1:.2f}")
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if price is not None:
+            st.markdown(f"**Current Price:** ${price:.2f}")
+        if rsi is not None:
+            st.markdown(f"**RSI (14):** {rsi:.2f}")
+        st.markdown(f"**Pivot Point:** ${PP:.2f}")
+
+    with col2:
+        st.markdown(f"**R1 (Resistance):** ${R1:.2f}")
+        st.markdown(f"**S1 (Support):** ${S1:.2f}")
+        
     st.markdown("---")
     st.markdown(f"## 🚦 Signal: {signal}")
     
-    if entry_price:
+    # Display trade details if there's an entry
+    if entry_price and stop_loss and take_profit:
         st.success(f"📌 Entry Price: ${entry_price:.2f}")
+        
+        # Calculate potential profit/loss
+        if trade_type == 'BUY':
+            risk_amount = entry_price - stop_loss
+            reward_amount = take_profit - entry_price
+        else:  # SELL
+            risk_amount = stop_loss - entry_price
+            reward_amount = entry_price - take_profit
+            
+        # Display risk management levels
+        risk_mgmt_col1, risk_mgmt_col2 = st.columns(2)
+        
+        with risk_mgmt_col1:
+            st.error(f"🛑 Stop Loss: ${stop_loss:.2f}")
+            st.write(f"Risk: ${risk_amount:.2f}")
+            
+        with risk_mgmt_col2:
+            st.success(f"🎯 Take Profit: ${take_profit:.2f}")
+            st.write(f"Reward: ${reward_amount:.2f}")
+            
+        # Display Risk:Reward ratio
+        st.info(f"Risk:Reward Ratio = 1:{RISK_REWARD_RATIO}")
+        
     else:
         st.info("📌 No valid entry at the moment.")
 
+    # Display timestamp and caption
+    st.markdown("---")
     st.caption("Signal generated using Pivot Points and RSI (14). Refresh to update.")
     st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
     
