@@ -1,6 +1,4 @@
 import streamlit as st
-
-# This must be the first Streamlit command
 st.set_page_config(page_title="Gold Intraday Signal", layout="centered")
 
 import pandas as pd
@@ -8,10 +6,6 @@ import numpy as np
 import requests
 from datetime import datetime
 import time
-
-# Current UTC time and user info
-CURRENT_UTC = "2025-06-10 08:10:51"
-CURRENT_USER = "GillyMwazala"
 
 # --- User must provide their Alpha Vantage API Key ---
 API_KEY = st.secrets["ALPHAVANTAGE_API_KEY"] if "ALPHAVANTAGE_API_KEY" in st.secrets else st.text_input("Enter your Alpha Vantage API Key:")
@@ -32,7 +26,6 @@ RSI_PERIOD = 14
 RSI_OVERSOLD = 30
 RSI_OVERBOUGHT = 70
 
-# --- Helper Functions ---
 def to_scalar(val):
     if isinstance(val, pd.Series) or isinstance(val, np.ndarray):
         return float(val.iloc[0]) if hasattr(val, "iloc") else float(val[0])
@@ -71,50 +64,33 @@ def calculate_risk_levels(entry_price, trade_type='BUY'):
 def fetch_alpha_vantage(symbol, interval, function, api_key, outputsize="compact"):
     url = "https://www.alphavantage.co/query"
     params = {
-        "function": "FX_INTRADAY",  # Fixed: Always use FX_INTRADAY for forex
+        "function": "FX_INTRADAY",
         "from_symbol": "XAU",
         "to_symbol": "USD",
         "interval": interval,
         "apikey": api_key,
         "outputsize": outputsize
     }
-    
     response = requests.get(url, params=params)
-    if response.status_code != 200:
-        st.error(f"Failed to fetch data from Alpha Vantage. Status code: {response.status_code}")
-        return None
-        
     data = response.json()
-    
-    # Debug information
-    st.write("API Response Keys:", list(data.keys()))
-    
-    # The correct key format for FX data
     time_series_key = f"Time Series FX ({interval})"
-    
     if time_series_key not in data:
+        # Print all non-time-series keys for troubleshooting
+        for key in data:
+            st.error(f"{key}: {data[key]}")
         st.error(f"No '{time_series_key}' found in Alpha Vantage response. Response contains: {list(data.keys())}")
-        if "Note" in data:
-            st.error(f"API Message: {data['Note']}")
-        if "Error Message" in data:
-            st.error(f"Error Message: {data['Error Message']}")
         return None
-        
     timeseries = data[time_series_key]
     df = pd.DataFrame(timeseries).T
-    
-    # Rename columns correctly for FX data
     df = df.rename(columns={
         "1. open": "open",
         "2. high": "high",
         "3. low": "low",
         "4. close": "close"
     })
-    
     df = df.astype(float)
     df.index = pd.to_datetime(df.index)
     df = df.sort_index()
-    
     return df
 
 # --- Streamlit UI ---
@@ -125,7 +101,6 @@ if not API_KEY:
     st.warning("Please enter your Alpha Vantage API Key to continue.")
     st.stop()
 
-# Download data
 @st.cache_data(ttl=60, show_spinner=True)
 def load_data():
     time.sleep(0.1)  # Add a small delay to avoid hitting rate limits
@@ -204,13 +179,13 @@ else:
     st.info("No active trade signal at this time.")
 
 # --- Footer with timestamp and user info ---
+NOW_UTC = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 st.markdown("---")
-st.caption(f"Last updated: {CURRENT_UTC} UTC")
-st.caption(f"Created by: {CURRENT_USER}")
+st.caption(f"Last updated: {NOW_UTC} UTC")
+st.caption("Created by: GillyMwazala")
 st.caption("Data: Alpha Vantage")
 
-# Add version info
 st.sidebar.markdown("### App Information")
-st.sidebar.caption(f"Version: 1.0.0")
-st.sidebar.caption(f"Last Updated: {CURRENT_UTC}")
-st.sidebar.caption(f"Developer: {CURRENT_USER}")
+st.sidebar.caption("Version: 1.0.0")
+st.sidebar.caption(f"Last Updated: {NOW_UTC}")
+st.sidebar.caption("Developer: GillyMwazala")
