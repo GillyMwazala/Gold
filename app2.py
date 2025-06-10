@@ -7,6 +7,10 @@ import requests
 from datetime import datetime
 import time
 
+# --- Current UTC time and User ---
+CURRENT_UTC = "2025-06-10 10:56:25"
+CURRENT_USER = "GillyMwazala"
+
 # --- Require the Twelve Data API Key in secrets ---
 if "TWELVE_DATA_API_KEY" not in st.secrets:
     st.error("Please add your Twelve Data API key to Streamlit secrets as 'TWELVE_DATA_API_KEY'.")
@@ -111,7 +115,19 @@ df['prev_close'] = df['close'].shift(1)
 df['prev_high'] = df['high'].shift(1)
 df['prev_low'] = df['low'].shift(1)
 
-# --- Backtest with improved confirmations & scaling into winners only ---
+def calculate_max_drawdown(equity_curve):
+    if not equity_curve:
+        return 0
+    peak = equity_curve[0]
+    max_dd = 0
+    for value in equity_curve:
+        if value > peak:
+            peak = value
+        dd = peak - value
+        if dd > max_dd:
+            max_dd = dd
+    return max_dd
+
 def backtest_confirmed_scaled(df):
     trades = []
     open_trade = None
@@ -119,13 +135,12 @@ def backtest_confirmed_scaled(df):
     timestamp_curve = []
     equity = 0
 
-    for i in range(TREND_SMA + 2, len(df)-1):  # ensure enough lookback for SMA
+    for i in range(TREND_SMA + 2, len(df)-1):
         row = df.iloc[i]
         prev_row = df.iloc[i-1]
         curr_time = df.index[i]
         atr = to_scalar(row['ATR'])
 
-        # --- ENTRY LOGIC WITH CONFIRMATION ---
         # Buy confirmation: RSI crosses below oversold, price closes above prev high, AND above SMA (trend filter)
         buy_confirm = (
             prev_row['RSI'] > RSI_OVERSOLD and row['RSI'] <= RSI_OVERSOLD and
@@ -139,8 +154,6 @@ def backtest_confirmed_scaled(df):
             row['close'] < row['SMA']
         )
 
-        # --- SCALING LOGIC: Only add to winning trades ---
-        # For scaling, wait for price to move in favor by scale_atr_buffer*ATR before next add
         if buy_confirm and open_trade is None:
             entry = row['close']
             stop = entry - STOP_LOSS_ATR * atr
@@ -155,7 +168,6 @@ def backtest_confirmed_scaled(df):
                 'last_scale_price': entry
             }
         elif open_trade and open_trade['side'] == "BUY" and open_trade['scale_count'] < SCALE_LEVELS:
-            # Only scale in if price in profit by at least SCALE_ATR_BUFFER*ATR from last scale
             if row['close'] > open_trade['last_scale_price'] + SCALE_ATR_BUFFER * atr:
                 entry = row['close']
                 stop = entry - STOP_LOSS_ATR * atr
@@ -181,7 +193,6 @@ def backtest_confirmed_scaled(df):
                 'last_scale_price': entry
             }
         elif open_trade and open_trade['side'] == "SELL" and open_trade['scale_count'] < SCALE_LEVELS:
-            # Only scale in if price in profit by at least SCALE_ATR_BUFFER*ATR from last scale
             if row['close'] < open_trade['last_scale_price'] - SCALE_ATR_BUFFER * atr:
                 entry = row['close']
                 stop = entry + STOP_LOSS_ATR * atr
@@ -193,7 +204,6 @@ def backtest_confirmed_scaled(df):
                 open_trade['scale_count'] += 1
                 open_trade['last_scale_price'] = entry
 
-        # --- EXIT LOGIC for open trade: check each lot separately (partial exits) ---
         if open_trade:
             exit_indices = []
             trade_results = []
@@ -204,19 +214,15 @@ def backtest_confirmed_scaled(df):
                 exit_price = None
                 exit_time = None
                 result = None
-                # For BUY
                 if open_trade['side'] == "BUY":
-                    # Stop loss
                     if row['low'] <= stop:
                         exit_price = stop
                         exit_time = curr_time
                         result = "Stopped"
-                    # Target
                     elif row['high'] >= target:
                         exit_price = target
                         exit_time = curr_time
                         result = "Target"
-                # For SELL
                 else:
                     if row['high'] >= stop:
                         exit_price = stop
@@ -240,7 +246,6 @@ def backtest_confirmed_scaled(df):
                     })
                     exit_indices.append(idx)
 
-            # Remove exited lots (do in reverse to avoid index errors)
             for idx in sorted(exit_indices, reverse=True):
                 del open_trade['lots'][idx]
                 del open_trade['entry_times'][idx]
@@ -248,19 +253,16 @@ def backtest_confirmed_scaled(df):
                 del open_trade['targets'][idx]
                 open_trade['scale_count'] -= 1
 
-            # If any trades closed, record them
             if trade_results:
                 for tr in trade_results:
                     trades.append(tr)
                     equity += tr['pnl']
-            # If all lots are closed, reset open_trade
             if open_trade['scale_count'] == 0:
                 open_trade = None
 
         equity_curve.append(equity)
         timestamp_curve.append(curr_time)
 
-    # At the end, close any open trades at last price
     if open_trade:
         row = df.iloc[-1]
         for idx, entry in enumerate(open_trade['lots']):
@@ -322,7 +324,8 @@ if run_backtest:
         avg_loss = 0
         profit_factor = 0
 
-    max_drawdown = min(0, min(equity_curve) - max(equity_curve[:equity_curve.index(min(equity_curve))]) if equity_curve else 0)
+    # Using the new max drawdown calculation
+    max_drawdown = calculate_max_drawdown(equity_curve) if equity_curve else 0
 
     st.success(f"Backtest completed. {len(df_trades)} exits (partial lots) recorded.")
 
@@ -398,13 +401,12 @@ if run_backtest:
     st.plotly_chart(price_fig, use_container_width=True)
 
 # --- Footer ---
-NOW_UTC = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 st.markdown("---")
-st.caption(f"Last updated: {NOW_UTC} UTC")
-st.caption("Created by: GillyMwazala")
+st.caption(f"Last updated: {CURRENT_UTC} UTC")
+st.caption(f"Created by: {CURRENT_USER}")
 st.caption("Data: Twelve Data")
 
 st.sidebar.markdown("### App Information")
 st.sidebar.caption("Version: 2.2.0")
-st.sidebar.caption(f"Last Updated: {NOW_UTC}")
-st.sidebar.caption("Developer: GillyMwazala")
+st.sidebar.caption(f"Last Updated: {CURRENT_UTC}")
+st.sidebar.caption(f"Developer: {CURRENT_USER}")
