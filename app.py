@@ -7,17 +7,17 @@ import requests
 from datetime import datetime
 import time
 
-# --- User must provide their Alpha Vantage API Key ---
-API_KEY = st.secrets["ALPHAVANTAGE_API_KEY"] if "ALPHAVANTAGE_API_KEY" in st.secrets else st.text_input("Enter your Alpha Vantage API Key:")
+# --- User must provide their Twelve Data API Key ---
+API_KEY = st.secrets["TWELVE_DATA_API_KEY"] if "TWELVE_DATA_API_KEY" in st.secrets else st.text_input("Enter your Twelve Data API Key:")
 
-st.title("📊 Gold Intraday Signal – Multi-Timeframe (Alpha Vantage)")
+st.title("📊 Gold Intraday Signal – Multi-Timeframe (Twelve Data)")
 
 # --- Constants ---
-GOLD_SYMBOL = "XAUUSD"
+GOLD_SYMBOL = "XAU/USD"
 TIMEFRAME_MAP = {
-    "5 min": ("5min", "FX_INTRADAY"),
-    "15 min": ("15min", "FX_INTRADAY"),
-    "1 hour": ("60min", "FX_INTRADAY"),
+    "5 min": "5min",
+    "15 min": "15min",
+    "1 hour": "1h",
 }
 RISK_REWARD_RATIO = 2.0
 STOP_LOSS_PERCENT = 0.005
@@ -61,50 +61,48 @@ def calculate_risk_levels(entry_price, trade_type='BUY'):
         take_profit = entry_price * (1 - TAKE_PROFIT_PERCENT)
     return stop_loss, take_profit
 
-def fetch_alpha_vantage(symbol, interval, function, api_key, outputsize="compact"):
-    url = "https://www.alphavantage.co/query"
+def fetch_twelve_data(symbol, interval, api_key, outputsize=500):
+    url = "https://api.twelvedata.com/time_series"
     params = {
-        "function": "FX_INTRADAY",
-        "from_symbol": "XAU",
-        "to_symbol": "USD",
+        "symbol": symbol,
         "interval": interval,
         "apikey": api_key,
-        "outputsize": outputsize
+        "outputsize": outputsize,
+        "format": "JSON"
     }
     response = requests.get(url, params=params)
     data = response.json()
-    time_series_key = f"Time Series FX ({interval})"
-    if time_series_key not in data:
-        # Print all non-time-series keys for troubleshooting
+    if "values" not in data:
         for key in data:
             st.error(f"{key}: {data[key]}")
-        st.error(f"No '{time_series_key}' found in Alpha Vantage response. Response contains: {list(data.keys())}")
+        st.error(f"No 'values' found in Twelve Data response. Response contains: {list(data.keys())}")
         return None
-    timeseries = data[time_series_key]
-    df = pd.DataFrame(timeseries).T
+    df = pd.DataFrame(data["values"])
     df = df.rename(columns={
-        "1. open": "open",
-        "2. high": "high",
-        "3. low": "low",
-        "4. close": "close"
+        "datetime": "datetime",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close"
     })
-    df = df.astype(float)
-    df.index = pd.to_datetime(df.index)
+    df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].astype(float)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime")
     df = df.sort_index()
     return df
 
 # --- Streamlit UI ---
 timeframe = st.selectbox("Select Timeframe", options=list(TIMEFRAME_MAP.keys()), index=2)
-interval, function = TIMEFRAME_MAP[timeframe]
+interval = TIMEFRAME_MAP[timeframe]
 
 if not API_KEY:
-    st.warning("Please enter your Alpha Vantage API Key to continue.")
+    st.warning("Please enter your Twelve Data API Key to continue.")
     st.stop()
 
 @st.cache_data(ttl=60, show_spinner=True)
 def load_data():
-    time.sleep(0.1)  # Add a small delay to avoid hitting rate limits
-    df = fetch_alpha_vantage(GOLD_SYMBOL, interval, function, API_KEY, outputsize="full")
+    time.sleep(0.1)
+    df = fetch_twelve_data(GOLD_SYMBOL, interval, API_KEY, outputsize=500)
     if df is None or len(df) < 22:
         return None
     return df
@@ -183,7 +181,7 @@ NOW_UTC = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
 st.markdown("---")
 st.caption(f"Last updated: {NOW_UTC} UTC")
 st.caption("Created by: GillyMwazala")
-st.caption("Data: Alpha Vantage")
+st.caption("Data: Twelve Data")
 
 st.sidebar.markdown("### App Information")
 st.sidebar.caption("Version: 1.0.0")
