@@ -1,18 +1,18 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import plotly.graph_objects as go
+import pandas_ta as ta
 
-st.set_page_config(page_title="Gold Intraday Trader", layout="wide")
-st.title("📈 Gold (XAU/USD) Intraday Strategy – Pivot + RSI")
+st.set_page_config(page_title="Gold Intraday Signal", layout="centered")
+st.title("📊 Gold Intraday Signal – Pivot + RSI Strategy")
 
-# 1. Load 5-min intraday data
+# 1. Load 5-minute intraday data
 @st.cache_data(ttl=60)
 def load_intraday():
     df = yf.download("GC=F", interval="5m", period="1d", progress=False)
     return df.dropna()
 
-# 2. Load previous day for pivot levels
+# 2. Load previous day data for pivot levels
 def get_pivot_levels():
     hist = yf.download("GC=F", interval="1d", period="2d", progress=False)
     prev_day = hist.iloc[0]
@@ -20,63 +20,52 @@ def get_pivot_levels():
     PP = (H + L + C) / 3
     R1 = 2 * PP - L
     S1 = 2 * PP - H
-    R2 = PP + (R1 - S1)
-    S2 = PP - (R1 - S1)
-    return PP, R1, S1, R2, S2
+    return PP, R1, S1
 
-# 3. Add indicators (RSI implementation without pandas_ta)
-def compute_rsi(series, length=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=length, min_periods=length).mean()
-    avg_loss = loss.rolling(window=length, min_periods=length).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
+# 3. Add RSI indicator
 def add_indicators(df):
-    df['RSI'] = compute_rsi(df['Close'], length=14)
+    df['RSI'] = ta.rsi(df['Close'], length=14)
     return df
 
-# 4. Generate signal
+# 4. Signal logic
 def get_signal(df, PP, R1, S1):
     latest = df.iloc[-1]
-    price = latest['Close']
-    rsi = latest['RSI']
+    price = float(latest['Close'])
+    rsi = float(latest['RSI'])
     signal = "Hold"
+    entry_price = None
+    exit_price = None
+
     if price <= S1 and rsi < 30:
-        signal = "🟢 Buy"
+        signal = "🟢 Entry: BUY"
+        entry_price = price
     elif price >= R1 and rsi > 70:
-        signal = "🔴 Sell"
-    return signal, price, rsi
+        signal = "🔴 Entry: SELL"
+        entry_price = price
+    else:
+        signal = "🟡 No Trade"
+
+    return signal, price, rsi, entry_price, exit_price
 
 # Run pipeline
 df = load_intraday()
-PP, R1, S1, R2, S2 = get_pivot_levels()
+PP, R1, S1 = get_pivot_levels()
 df = add_indicators(df)
-signal, price, rsi = get_signal(df, PP, R1, S1)
+signal, price, rsi, entry_price, exit_price = get_signal(df, PP, R1, S1)
 
-# Display metrics
-st.subheader(f"💰 Current Price: ${price:.2f}")
-st.markdown(f"**📉 RSI (14):** {rsi:.2f}")
-st.markdown(f"**📊 Pivot Point:** {PP:.2f} | **R1:** {R1:.2f} | **S1:** {S1:.2f}")
-st.markdown(f"### 🚦 Trading Signal: {signal}")
+# Display info
+st.markdown("### ⚙️ Strategy Summary")
+st.markdown(f"**Current Price:** ${price:.2f}")
+st.markdown(f"**RSI (14):** {rsi:.2f}")
+st.markdown(f"**Pivot Point:** {PP:.2f}")
+st.markdown(f"**R1 (Resistance):** {R1:.2f}")
+st.markdown(f"**S1 (Support):** {S1:.2f}")
 
-# Chart
-fig = go.Figure(data=[go.Candlestick(
-    x=df.index,
-    open=df['Open'], high=df['High'],
-    low=df['Low'], close=df['Close'],
-    name="Gold"
-)])
+st.markdown("---")
+st.markdown(f"## 🚦 Signal: {signal}")
+if entry_price:
+    st.success(f"📌 Entry Price: ${entry_price:.2f}")
+else:
+    st.info("📌 No valid entry at the moment.")
 
-# Add pivot levels
-fig.add_hline(y=PP, line=dict(color="gray", dash="dot"), annotation_text="Pivot", annotation_position="top left")
-fig.add_hline(y=R1, line=dict(color="red", dash="dot"), annotation_text="R1", annotation_position="top left")
-fig.add_hline(y=S1, line=dict(color="green", dash="dot"), annotation_text="S1", annotation_position="bottom left")
-
-fig.update_layout(title="Gold Intraday Chart (5m)", height=500, xaxis_rangeslider_visible=False)
-st.plotly_chart(fig, use_container_width=True)
-
-st.caption("Built with 💛 using Streamlit, Yahoo Finance, and Plotly")
+st.caption("Signal generated using Pivot Points and RSI (14). Refresh for latest data.")
