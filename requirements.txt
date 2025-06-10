@@ -1,5 +1,5 @@
 streamlit
-yfinance
+requests
 pandas
 plotly
 setuptools>=65.5.0
