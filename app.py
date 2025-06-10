@@ -1,4 +1,8 @@
 import streamlit as st
+
+# This must be the first Streamlit command
+st.set_page_config(page_title="Gold Intraday Signal", layout="centered")
+
 import pandas as pd
 import numpy as np
 import requests
@@ -7,7 +11,6 @@ from datetime import datetime
 # --- User must provide their Alpha Vantage API Key ---
 API_KEY = st.secrets["ALPHAVANTAGE_API_KEY"] if "ALPHAVANTAGE_API_KEY" in st.secrets else st.text_input("Enter your Alpha Vantage API Key:")
 
-st.set_page_config(page_title="Gold Intraday Signal", layout="centered")
 st.title("📊 Gold Intraday Signal – Multi-Timeframe (Alpha Vantage)")
 
 # --- Constants ---
@@ -177,4 +180,4 @@ else:
 
 st.markdown("---")
 st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-st.caption("Data: Alpha Vantage | App by Copilot")
+st.caption("Data: Alpha Vantage | App by GillyMwazala")
