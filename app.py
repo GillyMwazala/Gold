@@ -26,6 +26,55 @@ MACD_SLOW = 26
 MACD_SIGNAL = 9
 ATR_PERIOD = 14
 
+def calculate_rsi(series, period=14):
+    """Calculate RSI (Relative Strength Index)"""
+    try:
+        # Calculate price changes
+        delta = series.diff()
+        
+        # Separate gains and losses
+        gains = delta.where(delta > 0, 0.0)
+        losses = -delta.where(delta < 0, 0.0)
+        
+        # Calculate average gains and losses
+        avg_gains = gains.rolling(window=period).mean()
+        avg_losses = losses.rolling(window=period).mean()
+        
+        # Calculate RS and RSI
+        rs = avg_gains / avg_losses.replace(0, float('inf'))  # Avoid division by zero
+        rsi = 100 - (100 / (1 + rs))
+        
+        return rsi
+        
+    except Exception as e:
+        st.error(f"Error in RSI calculation: {str(e)}")
+        return pd.Series([np.nan] * len(series))
+
+def get_pivot_levels():
+    """Calculate pivot points based on previous day's data"""
+    try:
+        # Get previous day's data
+        hist = yf.download("GC=F", interval="1d", period="2d", progress=False)
+        if hist.empty:
+            raise ValueError("No historical data received")
+        
+        # Get previous day's high, low, and close
+        prev_day = hist.iloc[0]
+        H = float(prev_day['High'])
+        L = float(prev_day['Low'])
+        C = float(prev_day['Close'])
+        
+        # Calculate pivot levels
+        PP = (H + L + C) / 3
+        R1 = 2 * PP - L
+        S1 = 2 * PP - H
+        
+        return PP, R1, S1
+        
+    except Exception as e:
+        st.error(f"Error calculating pivot levels: {str(e)}")
+        return None, None, None
+
 def calculate_technical_indicators(df):
     """Calculate multiple technical indicators for better signal generation"""
     try:
@@ -57,264 +106,132 @@ def calculate_technical_indicators(df):
         df['Trend_Strength'] = df['Price_Change'].rolling(window=10).sum()
         
         return df
+        
     except Exception as e:
         st.error(f"Error calculating technical indicators: {str(e)}")
         return None
 
+def calculate_risk_levels(entry_price, trade_type='BUY'):
+    """Calculate Stop Loss and Take Profit levels"""
+    try:
+        if trade_type == 'BUY':
+            stop_loss = entry_price * (1 - STOP_LOSS_PERCENT)
+            take_profit = entry_price * (1 + TAKE_PROFIT_PERCENT)
+        else:  # SELL
+            stop_loss = entry_price * (1 + STOP_LOSS_PERCENT)
+            take_profit = entry_price * (1 - TAKE_PROFIT_PERCENT)
+        return stop_loss, take_profit
+    except Exception as e:
+        st.error(f"Error calculating risk levels: {str(e)}")
+        return None, None
+
 @st.cache_data(ttl=60)
 def load_intraday():
+    """Load and prepare intraday data"""
     try:
-        # Get more historical data for better analysis
+        # Download data
         df = yf.download("GC=F", interval="5m", period="5d", progress=False)
         if df.empty:
             raise ValueError("No data received from Yahoo Finance")
+            
+        # Calculate indicators
         df = calculate_technical_indicators(df)
+        if df is None:
+            raise ValueError("Error in technical indicators calculation")
+            
         return df.dropna()
+        
     except URLError as e:
-        st.error(f"Unable to fetch data. Please check your internet connection. Error: {e.reason}")
+        st.error(f"Network error: {str(e)}")
         return None
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         return None
 
-def analyze_market_context(df):
-    """Analyze overall market context"""
-    latest = df.iloc[-1]
-    context = {
-        'trend': 'neutral',
-        'strength': 'weak',
-        'volatility': 'normal'
-    }
-    
-    # Trend Analysis
-    if latest['EMA_short'] > latest['EMA_medium'] > latest['EMA_long']:
-        context['trend'] = 'strong_uptrend'
-    elif latest['EMA_short'] < latest['EMA_medium'] < latest['EMA_long']:
-        context['trend'] = 'strong_downtrend'
-    elif latest['EMA_short'] > latest['EMA_long']:
-        context['trend'] = 'uptrend'
-    elif latest['EMA_short'] < latest['EMA_long']:
-        context['trend'] = 'downtrend'
-    
-    # Trend Strength
-    strength_abs = abs(latest['Trend_Strength'])
-    if strength_abs > df['Trend_Strength'].std() * 2:
-        context['strength'] = 'strong'
-    elif strength_abs > df['Trend_Strength'].std():
-        context['strength'] = 'moderate'
-    
-    # Volatility
-    if latest['ATR'] > df['ATR'].mean() * 1.5:
-        context['volatility'] = 'high'
-    elif latest['ATR'] < df['ATR'].mean() * 0.5:
-        context['volatility'] = 'low'
-    
-    return context
-
-def calculate_confidence_score(price, rsi, macd_hist, context, pivot_distance):
-    """Calculate a confidence score for the signal"""
-    confidence = 50  # Base confidence
-    
-    # RSI contribution
-    if rsi < 20 or rsi > 80:
-        confidence += 15
-    elif rsi < 30 or rsi > 70:
-        confidence += 10
-    
-    # MACD contribution
-    if abs(macd_hist) > df['MACD_Histogram'].std() * 2:
-        confidence += 10
-    
-    # Trend alignment
-    if (context['trend'].endswith('uptrend') and price > pivot_distance) or \
-       (context['trend'].endswith('downtrend') and price < pivot_distance):
-        confidence += 15
-    
-    # Strength and volatility adjustments
-    if context['strength'] == 'strong':
-        confidence += 10
-    if context['volatility'] == 'high':
-        confidence -= 10
-    elif context['volatility'] == 'low':
-        confidence += 5
-        
-    return min(confidence, 100)  # Cap at 100%
-
-def get_enhanced_signal(df, PP, R1, S1):
-    try:
-        if df is None or PP is None:
-            raise ValueError("Missing required data")
-            
-        latest = df.iloc[-1]
-        price = float(latest['Close'])
-        rsi = float(latest['RSI'])
-        macd_hist = float(latest['MACD_Histogram'])
-        
-        # Convert pivot levels to float
-        S1 = float(S1)
-        R1 = float(R1)
-        PP = float(PP)
-        
-        # Analyze market context
-        context = analyze_market_context(df)
-        
-        signal = "Hold"
-        entry_price = None
-        stop_loss = None
-        take_profit = None
-        trade_type = None
-        confidence = 0
-
-        # Enhanced signal generation with multiple confirmations
-        if price <= S1 and rsi < RSI_OVERSOLD:
-            pivot_distance = abs(price - S1)
-            if latest['MACD_Histogram'] > 0 and latest['EMA_short'] > latest['EMA_medium']:
-                trade_type = 'BUY'
-                signal = "🟢 Strong Buy Signal"
-                entry_price = price
-                confidence = calculate_confidence_score(price, rsi, macd_hist, context, pivot_distance)
-            elif latest['MACD_Histogram'] > 0:
-                trade_type = 'BUY'
-                signal = "🟡 Moderate Buy Signal"
-                entry_price = price
-                confidence = calculate_confidence_score(price, rsi, macd_hist, context, pivot_distance) * 0.8
-                
-        elif price >= R1 and rsi > RSI_OVERBOUGHT:
-            pivot_distance = abs(price - R1)
-            if latest['MACD_Histogram'] < 0 and latest['EMA_short'] < latest['EMA_medium']:
-                trade_type = 'SELL'
-                signal = "🔴 Strong Sell Signal"
-                entry_price = price
-                confidence = calculate_confidence_score(price, rsi, macd_hist, context, pivot_distance)
-            elif latest['MACD_Histogram'] < 0:
-                trade_type = 'SELL'
-                signal = "🟡 Moderate Sell Signal"
-                entry_price = price
-                confidence = calculate_confidence_score(price, rsi, macd_hist, context, pivot_distance) * 0.8
-
-        # Calculate risk levels if we have a trade
-        if entry_price:
-            stop_loss, take_profit = calculate_risk_levels(entry_price, trade_type)
-            # Adjust based on ATR
-            atr = float(latest['ATR'])
-            if context['volatility'] == 'high':
-                stop_loss = adjust_risk_levels_for_volatility(entry_price, stop_loss, atr, trade_type)
-
-        return {
-            'signal': signal,
-            'price': price,
-            'rsi': rsi,
-            'entry_price': entry_price,
-            'stop_loss': stop_loss,
-            'take_profit': take_profit,
-            'trade_type': trade_type,
-            'confidence': confidence,
-            'context': context,
-            'macd_histogram': macd_hist,
-            'atr': float(latest['ATR'])
-        }
-    except Exception as e:
-        st.error(f"Error generating signal: {str(e)}")
-        return None
-
-def adjust_risk_levels_for_volatility(entry_price, stop_loss, atr, trade_type):
-    """Adjust stop loss based on ATR for high volatility periods"""
-    atr_multiplier = 1.5
-    if trade_type == 'BUY':
-        new_stop = entry_price - (atr * atr_multiplier)
-        return max(new_stop, stop_loss)  # Use the wider stop loss
-    else:
-        new_stop = entry_price + (atr * atr_multiplier)
-        return min(new_stop, stop_loss)  # Use the wider stop loss
-
 # Main execution pipeline
 try:
+    # Load market data
     df = load_intraday()
     if df is None:
         st.warning("Unable to load market data. Please try again later.")
         st.stop()
 
+    # Calculate pivot levels
     PP, R1, S1 = get_pivot_levels()
     if None in (PP, R1, S1):
         st.warning("Unable to calculate pivot levels. Please try again later.")
         st.stop()
 
-    # Generate enhanced signal
-    signal_data = get_enhanced_signal(df, PP, R1, S1)
+    # Get latest data point
+    latest = df.iloc[-1]
     
-    if signal_data:
-        # Display market context
-        st.markdown("### 🌍 Market Context")
-        context = signal_data['context']
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.write(f"**Trend:** {context['trend'].replace('_', ' ').title()}")
-        with col2:
-            st.write(f"**Strength:** {context['strength'].title()}")
-        with col3:
-            st.write(f"**Volatility:** {context['volatility'].title()}")
+    # Display current market price
+    st.markdown("### 📈 Current Market Status")
+    st.metric(
+        label="Gold Price", 
+        value=f"${latest['Close']:.2f}",
+        delta=f"{(latest['Close'] - df.iloc[-2]['Close']):.2f}"
+    )
 
-        # Display technical indicators
-        st.markdown("### 📊 Technical Indicators")
-        tech_col1, tech_col2, tech_col3 = st.columns(3)
+    # Display technical indicators
+    st.markdown("### 📊 Technical Indicators")
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        rsi_value = latest['RSI']
+        st.metric("RSI (14)", f"{rsi_value:.2f}")
+        if rsi_value >= RSI_OVERBOUGHT:
+            st.markdown("🔴 Overbought")
+        elif rsi_value <= RSI_OVERSOLD:
+            st.markdown("🟢 Oversold")
+            
+    with col2:
+        macd_hist = latest['MACD_Histogram']
+        st.metric("MACD Histogram", f"{macd_hist:.4f}")
+        if macd_hist > 0:
+            st.markdown("🟢 Bullish")
+        else:
+            st.markdown("🔴 Bearish")
+            
+    with col3:
+        st.metric("ATR", f"{latest['ATR']:.2f}")
         
-        with tech_col1:
-            st.write(f"**RSI (14):** {signal_data['rsi']:.2f}")
-            rsi_color = 'red' if signal_data['rsi'] > 70 else 'green' if signal_data['rsi'] < 30 else 'orange'
-            st.markdown(f"<span style='color:{rsi_color}'>{'Overbought' if signal_data['rsi'] > 70 else 'Oversold' if signal_data['rsi'] < 30 else 'Neutral'}</span>", unsafe_allow_html=True)
+    # Display pivot levels
+    st.markdown("### 🎯 Pivot Levels")
+    pivot_col1, pivot_col2, pivot_col3 = st.columns(3)
+    
+    with pivot_col1:
+        st.metric("Resistance (R1)", f"${R1:.2f}")
+    with pivot_col2:
+        st.metric("Pivot Point (PP)", f"${PP:.2f}")
+    with pivot_col3:
+        st.metric("Support (S1)", f"${S1:.2f}")
 
-        with tech_col2:
-            st.write(f"**MACD Histogram:** {signal_data['macd_histogram']:.4f}")
-            macd_color = 'green' if signal_data['macd_histogram'] > 0 else 'red'
-            st.markdown(f"<span style='color:{macd_color}'>{'Bullish' if signal_data['macd_histogram'] > 0 else 'Bearish'}</span>", unsafe_allow_html=True)
+    # Generate and display trading signal
+    current_price = latest['Close']
+    rsi = latest['RSI']
+    
+    signal = "🟡 HOLD"
+    if current_price <= S1 and rsi <= RSI_OVERSOLD and latest['MACD_Histogram'] > 0:
+        signal = "🟢 BUY"
+        stop_loss, take_profit = calculate_risk_levels(current_price, 'BUY')
+    elif current_price >= R1 and rsi >= RSI_OVERBOUGHT and latest['MACD_Histogram'] < 0:
+        signal = "🔴 SELL"
+        stop_loss, take_profit = calculate_risk_levels(current_price, 'SELL')
 
-        with tech_col3:
-            st.write(f"**ATR:** {signal_data['atr']:.2f}")
-            
-        # Display signal and confidence
-        st.markdown("### 🎯 Trading Signal")
-        signal_col1, signal_col2 = st.columns(2)
+    st.markdown("### 🚦 Trading Signal")
+    st.markdown(f"## {signal}")
+    
+    if signal != "🟡 HOLD":
+        st.markdown("### 💰 Trade Levels")
+        levels_col1, levels_col2, levels_col3 = st.columns(3)
         
-        with signal_col1:
-            st.markdown(f"## {signal_data['signal']}")
-            
-        with signal_col2:
-            confidence = signal_data['confidence']
-            confidence_color = 'green' if confidence > 70 else 'orange' if confidence > 50 else 'red'
-            st.markdown(f"**Confidence Score:** <span style='color:{confidence_color}'>{confidence:.1f}%</span>", unsafe_allow_html=True)
-
-        # Display trade details if there's an entry
-        if signal_data['entry_price']:
-            st.markdown("### 💹 Trade Details")
-            trade_col1, trade_col2, trade_col3 = st.columns(3)
-            
-            with trade_col1:
-                st.success(f"📌 Entry: ${signal_data['entry_price']:.2f}")
-                
-            with trade_col2:
-                st.error(f"🛑 Stop Loss: ${signal_data['stop_loss']:.2f}")
-                
-            with trade_col3:
-                st.info(f"🎯 Take Profit: ${signal_data['take_profit']:.2f}")
-
-            # Calculate potential profit/loss
-            if signal_data['trade_type'] == 'BUY':
-                risk = signal_data['entry_price'] - signal_data['stop_loss']
-                reward = signal_data['take_profit'] - signal_data['entry_price']
-            else:
-                risk = signal_data['stop_loss'] - signal_data['entry_price']
-                reward = signal_data['entry_price'] - signal_data['take_profit']
-
-            st.markdown("### 📊 Risk Management")
-            risk_col1, risk_col2 = st.columns(2)
-            
-            with risk_col1:
-                st.write(f"**Risk Amount:** ${risk:.2f}")
-                st.write(f"**Reward Amount:** ${reward:.2f}")
-                
-            with risk_col2:
-                st.write(f"**Risk:Reward Ratio:** 1:{RISK_REWARD_RATIO}")
-                st.write(f"**Position Size Suggestion:** Based on 1% account risk")
+        with levels_col1:
+            st.metric("Entry", f"${current_price:.2f}")
+        with levels_col2:
+            st.metric("Stop Loss", f"${stop_loss:.2f}")
+        with levels_col3:
+            st.metric("Take Profit", f"${take_profit:.2f}")
 
     # Display timestamp
     st.markdown("---")
